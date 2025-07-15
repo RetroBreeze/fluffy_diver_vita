@@ -19,6 +19,7 @@
 #include <sys/types.h>
 #include <fcntl.h>
 #include <dlfcn.h>
+#include <pthread.h>
 
 #include <psp2/kernel/clib.h>
 #include <psp2/kernel/threadmgr.h>
@@ -38,137 +39,49 @@
 // Fake FILE structure for compatibility
 FILE __sF_fake[3];
 
-// Math library functions
-extern double acos(double);
-extern double asin(double);
-extern double atan(double);
-extern double atan2(double, double);
-extern double cos(double);
-extern double sin(double);
-extern double tan(double);
-extern double cosh(double);
-extern double sinh(double);
-extern double tanh(double);
-extern double exp(double);
-extern double log(double);
-extern double log10(double);
-extern double pow(double, double);
-extern double sqrt(double);
-extern double ceil(double);
-extern double floor(double);
-extern double fabs(double);
-extern double fmod(double, double);
-extern float fabsf(float);
-extern float floorf(float);
-extern float ceilf(float);
-extern float sqrtf(float);
-extern float sinf(float);
-extern float cosf(float);
-extern float tanf(float);
-extern float asinf(float);
-extern float acosf(float);
-extern float atanf(float);
-extern float atan2f(float, float);
-extern float expf(float);
-extern float logf(float);
-extern float log10f(float);
-extern float powf(float, float);
-extern float fmodf(float, float);
-
-// String functions
-extern char *strdup(const char *);
-extern size_t strnlen(const char *, size_t);
-extern char *strtok_r(char *, const char *, char **);
-extern long strtol(const char *, char **, int);
-extern unsigned long strtoul(const char *, char **, int);
-extern double strtod(const char *, char **);
-extern float strtof(const char *, char **);
-
-// Memory functions
-extern void *memmem(const void *, size_t, const void *, size_t);
-extern void *memrchr(const void *, int, size_t);
-
-// Thread functions
-extern int pthread_create(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *);
-extern int pthread_join(pthread_t, void **);
-extern int pthread_detach(pthread_t);
-extern int pthread_mutex_init(pthread_mutex_t *, const pthread_mutexattr_t *);
-extern int pthread_mutex_destroy(pthread_mutex_t *);
-extern int pthread_mutex_lock(pthread_mutex_t *);
-extern int pthread_mutex_unlock(pthread_mutex_t *);
-extern int pthread_cond_init(pthread_cond_t *, const pthread_condattr_t *);
-extern int pthread_cond_destroy(pthread_cond_t *);
-extern int pthread_cond_wait(pthread_cond_t *, pthread_mutex_t *);
-extern int pthread_cond_signal(pthread_cond_t *);
-extern int pthread_cond_broadcast(pthread_cond_t *);
-
-// OpenGL ES functions used by Fluffy Diver (45 functions identified)
-// These are provided by VitaGL and mapped to the Android game
-
-// Dummy implementations for functions that might not be essential
-int __android_log_print(int prio, const char *tag, const char *fmt, ...) {
+// Android logging functions
+int __android_log_print(int prio __attribute__((unused)), const char *tag __attribute__((unused)), const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    char buffer[1024];
-    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    int result = vprintf(fmt, args);
     va_end(args);
-    l_debug("[%s] %s", tag ? tag : "ANDROID", buffer);
-    return 0;
+    return result;
 }
 
-int __android_log_vprint(int prio, const char *tag, const char *fmt, va_list ap) {
-    char buffer[1024];
-    vsnprintf(buffer, sizeof(buffer), fmt, ap);
-    l_debug("[%s] %s", tag ? tag : "ANDROID", buffer);
-    return 0;
+int __android_log_vprint(int prio __attribute__((unused)), const char *tag __attribute__((unused)), const char *fmt, va_list ap) {
+    return vprintf(fmt, ap);
 }
 
 void __android_log_assert(const char *cond, const char *tag, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    char buffer[1024];
-    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    printf("ASSERT: %s %s: ", tag, cond);
+    vprintf(fmt, args);
+    printf("\n");
     va_end(args);
-    l_fatal("[%s] ASSERTION FAILED: %s - %s", tag ? tag : "ANDROID", cond, buffer);
+    abort();
 }
 
-// Network functions (stub implementation)
+// Errno location function
+int* __errno_location(void) {
+    return &errno;
+}
+
+// OpenGL ES stub functions for unsupported functions
+void glDetachShader_stub(GLuint program __attribute__((unused)), GLuint shader __attribute__((unused))) {
+    // VitaGL doesn't support glDetachShader, so we'll just log it
+    l_debug("glDetachShader called (stubbed)");
+}
+
+// Network stub functions
 int gethostname(char *name, size_t len) {
-    strncpy(name, "vita", len);
+    strncpy(name, "psvita", len);
     return 0;
 }
 
-// Directory functions
-int mkdir(const char *path, mode_t mode) {
-    return sceIoMkdir(path, mode);
-}
-
-int rmdir(const char *path) {
-    return sceIoRmdir(path);
-}
-
-// File I/O wrappers
-FILE *fopen(const char *path, const char *mode) {
-    // Convert Android paths to Vita paths
-    char vita_path[256];
-
-    if (strstr(path, "/android_asset/") == path) {
-        snprintf(vita_path, sizeof(vita_path), "ux0:data/fluffydiver/assets/%s",
-                 path + strlen("/android_asset/"));
-    } else if (strstr(path, "/data/data/") == path) {
-        snprintf(vita_path, sizeof(vita_path), "ux0:data/fluffydiver/save/%s",
-                 path + strlen("/data/data/com.hotdog.fluffydiver/"));
-    } else {
-        strncpy(vita_path, path, sizeof(vita_path) - 1);
-        vita_path[sizeof(vita_path) - 1] = '\0';
-    }
-
-    return fopen(vita_path, mode);
-}
-
-// Complete symbol resolution table for Fluffy Diver
-static so_default_dynlib default_dynlib[] = {
-    // Standard C library functions
+// Symbol resolution table
+so_default_dynlib default_dynlib[] = {
+    // Memory functions
     {"malloc", (uintptr_t)&malloc},
     {"free", (uintptr_t)&free},
     {"calloc", (uintptr_t)&calloc},
@@ -178,12 +91,9 @@ static so_default_dynlib default_dynlib[] = {
     {"memset", (uintptr_t)&memset},
     {"memcmp", (uintptr_t)&memcmp},
     {"memchr", (uintptr_t)&memchr},
-    {"memmem", (uintptr_t)&memmem},
-    {"memrchr", (uintptr_t)&memrchr},
 
     // String functions
     {"strlen", (uintptr_t)&strlen},
-    {"strnlen", (uintptr_t)&strnlen},
     {"strcpy", (uintptr_t)&strcpy},
     {"strncpy", (uintptr_t)&strncpy},
     {"strcat", (uintptr_t)&strcat},
@@ -194,14 +104,18 @@ static so_default_dynlib default_dynlib[] = {
     {"strrchr", (uintptr_t)&strrchr},
     {"strstr", (uintptr_t)&strstr},
     {"strdup", (uintptr_t)&strdup},
+    {"strcasecmp", (uintptr_t)&strcasecmp},
+    {"strncasecmp", (uintptr_t)&strncasecmp},
     {"strtok", (uintptr_t)&strtok},
-    {"strtok_r", (uintptr_t)&strtok_r},
     {"strtol", (uintptr_t)&strtol},
     {"strtoul", (uintptr_t)&strtoul},
     {"strtod", (uintptr_t)&strtod},
     {"strtof", (uintptr_t)&strtof},
+    {"atoi", (uintptr_t)&atoi},
+    {"atol", (uintptr_t)&atol},
+    {"atof", (uintptr_t)&atof},
 
-    // Math functions (critical for game physics)
+    // Math functions
     {"sin", (uintptr_t)&sin},
     {"cos", (uintptr_t)&cos},
     {"tan", (uintptr_t)&tan},
@@ -280,6 +194,8 @@ static so_default_dynlib default_dynlib[] = {
     {"glTranslatef", (uintptr_t)&glTranslatef},
     {"glVertexPointer", (uintptr_t)&glVertexPointer},
     {"glViewport", (uintptr_t)&glViewport},
+    {"glGetIntegerv", (uintptr_t)&glGetIntegerv},
+    {"glGetFloatv", (uintptr_t)&glGetFloatv},
 
     // OpenGL ES 2.x functions
     {"glAttachShader", (uintptr_t)&glAttachShader},
@@ -292,7 +208,7 @@ static so_default_dynlib default_dynlib[] = {
     {"glDeleteBuffers", (uintptr_t)&glDeleteBuffers},
     {"glDeleteProgram", (uintptr_t)&glDeleteProgram},
     {"glDeleteShader", (uintptr_t)&glDeleteShader},
-    {"glDetachShader", (uintptr_t)&glDetachShader},
+    {"glDetachShader", (uintptr_t)&glDetachShader_stub},
     {"glDisableVertexAttribArray", (uintptr_t)&glDisableVertexAttribArray},
     {"glEnableVertexAttribArray", (uintptr_t)&glEnableVertexAttribArray},
     {"glGenBuffers", (uintptr_t)&glGenBuffers},
@@ -426,8 +342,8 @@ void resolve_imports(so_module* mod) {
     __sF_fake[2] = *stderr;
 
     // Resolve symbols using our custom table
-    so_resolve(mod, default_dynlib, sizeof(default_dynlib), 0);
+    so_resolve(mod, default_dynlib, sizeof(default_dynlib) / sizeof(so_default_dynlib), 0);
 
     l_success("Symbol resolution complete - %d symbols resolved",
-              sizeof(default_dynlib) / sizeof(so_default_dynlib));
+              (int)(sizeof(default_dynlib) / sizeof(so_default_dynlib)));
 }

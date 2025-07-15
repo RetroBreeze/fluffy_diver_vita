@@ -1,64 +1,81 @@
 /*
  * Fluffy Diver PS Vita Port
- * Game-specific patches and memory hooks
+ * Game patches and memory management
  */
 
-#include <psp2/kernel/clib.h>
 #include <psp2/kernel/sysmem.h>
-#include <kubridge.h>
-#include <vitasdk.h>
-
-#include <so_util/so_util.h>
-#include "utils/logger.h"
-#include "utils/utils.h"
+#include <psp2/kernel/threadmgr.h>
+#include <psp2/kernel/processmgr.h>
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-extern so_module so_mod;
+#include <so_util/so_util.h>
+#include "utils/logger.h"
+#include "utils/utils.h"
 
-// Memory allocation tracking for debugging
+// Memory tracking
+#define MAX_ALLOCS 2048
+
 typedef struct {
     void *ptr;
     size_t size;
     const char *func;
     int line;
-    int active;
+    int used;
 } alloc_info_t;
 
-#define MAX_ALLOCS 4096
 static alloc_info_t alloc_table[MAX_ALLOCS];
 static int alloc_count = 0;
 static size_t total_allocated = 0;
+static int memory_tracking_enabled = 1;
 
-// Function hooks and patches
+// Function pointer storage for patches
+static void *(*original_malloc)(size_t) __attribute__((unused)) = NULL;
+static void (*original_free)(void*) __attribute__((unused)) = NULL;
+static void *(*original_realloc)(void*, size_t) __attribute__((unused)) = NULL;
+static void *(*original_calloc)(size_t, size_t) __attribute__((unused)) = NULL;
+
+// OpenGL function pointers (unused but kept for future patches)
+static void (*original_glTexImage2D)(int, int, int, int, int, int, int, const void*) __attribute__((unused)) = NULL;
+static void (*original_glBindTexture)(int, int) __attribute__((unused)) = NULL;
+
+// File I/O function pointers (unused but kept for future patches)
+static int (*original_fopen)(const char*, const char*) __attribute__((unused)) = NULL;
+static int (*original_fclose)(void*) __attribute__((unused)) = NULL;
+
+// Game state for patches
+static struct {
+    int initialized;
+    int monetization_disabled;
+    int unlimited_currency;
+    int debug_mode;
+    int memory_tracking;
+} fluffy_state = {0};
+
+// Forward declarations
 static void patch_memory_functions(void);
 static void patch_file_functions(void);
 static void patch_graphics_functions(void);
 static void patch_audio_functions(void);
 static void patch_monetization_system(void);
-static void setup_memory_tracking(void);
+static void init_memory_tracking(void);
 
-// Memory allocation wrappers
-void* malloc_tracked(size_t size, const char* func, int line);
-void free_tracked(void* ptr, const char* func, int line);
-void* calloc_tracked(size_t nmemb, size_t size, const char* func, int line);
-void* realloc_tracked(void* ptr, size_t size, const char* func, int line);
+// ===== MAIN PATCH ENTRY POINT =====
 
-// File I/O hooks
-static int (*original_fopen)(const char*, const char*) = NULL;
-static int (*original_fclose)(void*) = NULL;
+void patch_game(void) {
+    l_info("Applying Fluffy Diver patches");
 
-// Graphics hooks
-static void (*original_glTexImage2D)(int, int, int, int, int, int, int, const void*) = NULL;
-static void (*original_glBindTexture)(int, int) = NULL;
+    // Initialize patch state
+    fluffy_state.initialized = 1;
+    fluffy_state.monetization_disabled = 1;
+    fluffy_state.unlimited_currency = 1;
+    fluffy_state.debug_mode = 1;
+    fluffy_state.memory_tracking = 1;
 
-void so_patch(void) {
-    l_info("Applying Fluffy Diver specific patches");
-
-    // Setup memory tracking
-    setup_memory_tracking();
+    // Initialize memory tracking
+    init_memory_tracking();
 
     // Apply patches
     patch_memory_functions();
@@ -70,8 +87,10 @@ void so_patch(void) {
     l_success("All patches applied successfully");
 }
 
-static void setup_memory_tracking(void) {
-    sceClibMemset(alloc_table, 0, sizeof(alloc_table));
+// ===== MEMORY MANAGEMENT PATCHES =====
+
+static void init_memory_tracking(void) {
+    memset(alloc_table, 0, sizeof(alloc_table));
     alloc_count = 0;
     total_allocated = 0;
 
@@ -90,6 +109,118 @@ static void patch_memory_functions(void) {
     // For now, we'll just log that memory patches are ready
     l_success("Memory function patches applied");
 }
+
+void* malloc_tracked(size_t size, const char* func, int line) {
+    if (!memory_tracking_enabled) {
+        return malloc(size);
+    }
+
+    void* ptr = malloc(size);
+    if (ptr && alloc_count < MAX_ALLOCS) {
+        // Find empty slot
+        for (int i = 0; i < MAX_ALLOCS; i++) {
+            if (!alloc_table[i].used) {
+                alloc_table[i].ptr = ptr;
+                alloc_table[i].size = size;
+                alloc_table[i].func = func;
+                alloc_table[i].line = line;
+                alloc_table[i].used = 1;
+                alloc_count++;
+                total_allocated += size;
+                break;
+            }
+        }
+    }
+
+    return ptr;
+}
+
+void free_tracked(void* ptr, const char* func __attribute__((unused)), int line __attribute__((unused))) {
+    if (!memory_tracking_enabled) {
+        free(ptr);
+        return;
+    }
+
+    if (ptr) {
+        // Find and remove from tracking
+        for (int i = 0; i < MAX_ALLOCS; i++) {
+            if (alloc_table[i].used && alloc_table[i].ptr == ptr) {
+                total_allocated -= alloc_table[i].size;
+                alloc_table[i].used = 0;
+                alloc_count--;
+                break;
+            }
+        }
+        free(ptr);
+    }
+}
+
+void* realloc_tracked(void* ptr, size_t size, const char* func, int line) {
+    if (!memory_tracking_enabled) {
+        return realloc(ptr, size);
+    }
+
+    // Remove old tracking entry
+    if (ptr) {
+        for (int i = 0; i < MAX_ALLOCS; i++) {
+            if (alloc_table[i].used && alloc_table[i].ptr == ptr) {
+                total_allocated -= alloc_table[i].size;
+                alloc_table[i].used = 0;
+                alloc_count--;
+                break;
+            }
+        }
+    }
+
+    // Reallocate
+    void* new_ptr = realloc(ptr, size);
+
+    // Add new tracking entry
+    if (new_ptr && alloc_count < MAX_ALLOCS) {
+        for (int i = 0; i < MAX_ALLOCS; i++) {
+            if (!alloc_table[i].used) {
+                alloc_table[i].ptr = new_ptr;
+                alloc_table[i].size = size;
+                alloc_table[i].func = func;
+                alloc_table[i].line = line;
+                alloc_table[i].used = 1;
+                alloc_count++;
+                total_allocated += size;
+                break;
+            }
+        }
+    }
+
+    return new_ptr;
+}
+
+void* calloc_tracked(size_t num, size_t size, const char* func, int line) {
+    if (!memory_tracking_enabled) {
+        return calloc(num, size);
+    }
+
+    size_t total_size = num * size;
+    void* ptr = calloc(num, size);
+
+    if (ptr && alloc_count < MAX_ALLOCS) {
+        for (int i = 0; i < MAX_ALLOCS; i++) {
+            if (!alloc_table[i].used) {
+                alloc_table[i].ptr = ptr;
+                alloc_table[i].size = total_size;
+                alloc_table[i].func = func;
+                alloc_table[i].line = line;
+                alloc_table[i].used = 1;
+                alloc_count++;
+                total_allocated += total_size;
+                break;
+            }
+        }
+    }
+
+    return ptr;
+}
+
+// ===== OTHER PATCHES =====
 
 static void patch_file_functions(void) {
     l_info("Patching file I/O functions");
@@ -132,137 +263,132 @@ static void patch_audio_functions(void) {
 static void patch_monetization_system(void) {
     l_info("Patching monetization system");
 
-    // Disable or modify in-app purchase functionality
-    // This is handled in our JNI implementation (onCashUpdate)
+    // Disable or modify in-app purchases
+    // This is mainly handled in the JNI layer
 
-    // Example: Patch functions that check for premium content
-    // Replace them with functions that always return "unlocked"
+    fluffy_state.monetization_disabled = 1;
+    fluffy_state.unlimited_currency = 1;
 
-    l_success("Monetization patches applied - premium features unlocked");
+    l_success("Monetization system bypassed");
 }
 
-// Memory allocation tracking implementation
-void* malloc_tracked(size_t size, const char* func, int line) {
-    void* ptr = malloc(size);
+// ===== MEMORY TRACKING UTILITIES =====
 
-    if (ptr && alloc_count < MAX_ALLOCS) {
-        alloc_table[alloc_count].ptr = ptr;
-        alloc_table[alloc_count].size = size;
-        alloc_table[alloc_count].func = func;
-        alloc_table[alloc_count].line = line;
-        alloc_table[alloc_count].active = 1;
-        alloc_count++;
-        total_allocated += size;
-
-        if (size > 1024 * 1024) { // Log large allocations
-            l_debug("Large allocation: %zu bytes at %s:%d", size, func, line);
-        }
-    }
-
-    return ptr;
-}
-
-void free_tracked(void* ptr, const char* func, int line) {
-    if (!ptr) return;
-
-    // Find allocation in table
-    for (int i = 0; i < alloc_count; i++) {
-        if (alloc_table[i].ptr == ptr && alloc_table[i].active) {
-            alloc_table[i].active = 0;
-            total_allocated -= alloc_table[i].size;
-            break;
-        }
-    }
-
-    free(ptr);
-}
-
-void* calloc_tracked(size_t nmemb, size_t size, const char* func, int line) {
-    size_t total_size = nmemb * size;
-    void* ptr = malloc_tracked(total_size, func, line);
-
-    if (ptr) {
-        memset(ptr, 0, total_size);
-    }
-
-    return ptr;
-}
-
-void* realloc_tracked(void* ptr, size_t size, const char* func, int line) {
-    if (!ptr) {
-        return malloc_tracked(size, func, line);
-    }
-
-    // Find old allocation
-    size_t old_size = 0;
-    for (int i = 0; i < alloc_count; i++) {
-        if (alloc_table[i].ptr == ptr && alloc_table[i].active) {
-            old_size = alloc_table[i].size;
-            alloc_table[i].active = 0;
-            total_allocated -= old_size;
-            break;
-        }
-    }
-
-    void* new_ptr = realloc(ptr, size);
-
-    if (new_ptr && alloc_count < MAX_ALLOCS) {
-        alloc_table[alloc_count].ptr = new_ptr;
-        alloc_table[alloc_count].size = size;
-        alloc_table[alloc_count].func = func;
-        alloc_table[alloc_count].line = line;
-        alloc_table[alloc_count].active = 1;
-        alloc_count++;
-        total_allocated += size;
-    }
-
-    return new_ptr;
-}
-
-// Debug function to print memory usage
 void print_memory_stats(void) {
-    int active_allocs = 0;
-    size_t active_memory = 0;
+    l_info("=== Memory Statistics ===");
+    l_info("  Total allocations: %d", alloc_count);
+    l_info("  Total allocated: %zu bytes", total_allocated);
+    l_info("  Average allocation: %zu bytes", alloc_count > 0 ? total_allocated / alloc_count : 0);
 
-    for (int i = 0; i < alloc_count; i++) {
-        if (alloc_table[i].active) {
-            active_allocs++;
-            active_memory += alloc_table[i].size;
+    // Memory usage by category
+    size_t small_allocs = 0, medium_allocs = 0, large_allocs = 0;
+    for (int i = 0; i < MAX_ALLOCS; i++) {
+        if (alloc_table[i].used) {
+            if (alloc_table[i].size < 1024) {
+                small_allocs++;
+            } else if (alloc_table[i].size < 65536) {
+                medium_allocs++;
+            } else {
+                large_allocs++;
+            }
         }
     }
 
-    l_info("Memory Stats: %d active allocations, %zu bytes total",
-           active_allocs, active_memory);
+    l_info("  Small allocations (<1KB): %zu", small_allocs);
+    l_info("  Medium allocations (1KB-64KB): %zu", medium_allocs);
+    l_info("  Large allocations (>64KB): %zu", large_allocs);
 }
 
-// Function to apply runtime patches based on game behavior
-void apply_runtime_patches(void) {
-    // This function can be called during gameplay to apply patches
-    // based on observed behavior or user settings
-
-    // Example: Adjust graphics settings based on performance
-    // Example: Modify audio settings based on system load
-
-    l_debug("Runtime patches applied");
-}
-
-// Clean up memory tracking on exit
 void cleanup_memory_tracking(void) {
-    int leaks = 0;
-    size_t leaked_memory = 0;
+    if (!memory_tracking_enabled) {
+        return;
+    }
 
-    for (int i = 0; i < alloc_count; i++) {
-        if (alloc_table[i].active) {
+    l_info("Cleaning up memory tracking");
+
+    // Check for leaks
+    int leaks = 0;
+    for (int i = 0; i < MAX_ALLOCS; i++) {
+        if (alloc_table[i].used) {
             leaks++;
-            leaked_memory += alloc_table[i].size;
-            l_warning("Memory leak: %zu bytes at %s:%d",
-                      alloc_table[i].size, alloc_table[i].func, alloc_table[i].line);
+            l_warn("Memory leak: %zu bytes at %s:%d",
+                   alloc_table[i].size, alloc_table[i].func, alloc_table[i].line);
         }
     }
 
     if (leaks > 0) {
-        l_warning("Total memory leaks: %d allocations, %zu bytes", leaks, leaked_memory);
+        l_error("Found %d memory leaks", leaks);
     } else {
         l_success("No memory leaks detected");
     }
+
+    // Final stats
+    print_memory_stats();
 }
+
+// ===== PATCH UTILITIES =====
+
+int is_patch_enabled(const char* patch_name) {
+    if (strcmp(patch_name, "memory_tracking") == 0) {
+        return fluffy_state.memory_tracking;
+    } else if (strcmp(patch_name, "monetization_disabled") == 0) {
+        return fluffy_state.monetization_disabled;
+    } else if (strcmp(patch_name, "unlimited_currency") == 0) {
+        return fluffy_state.unlimited_currency;
+    } else if (strcmp(patch_name, "debug_mode") == 0) {
+        return fluffy_state.debug_mode;
+    }
+
+    return 0;
+}
+
+void enable_patch(const char* patch_name, int enable) {
+    if (strcmp(patch_name, "memory_tracking") == 0) {
+        fluffy_state.memory_tracking = enable;
+        memory_tracking_enabled = enable;
+    } else if (strcmp(patch_name, "monetization_disabled") == 0) {
+        fluffy_state.monetization_disabled = enable;
+    } else if (strcmp(patch_name, "unlimited_currency") == 0) {
+        fluffy_state.unlimited_currency = enable;
+    } else if (strcmp(patch_name, "debug_mode") == 0) {
+        fluffy_state.debug_mode = enable;
+    }
+
+    l_info("Patch '%s' %s", patch_name, enable ? "enabled" : "disabled");
+}
+
+// ===== CLEANUP =====
+
+void cleanup_patches(void) {
+    l_info("Cleaning up patches");
+
+    // Cleanup memory tracking
+    cleanup_memory_tracking();
+
+    // Reset patch state
+    fluffy_state.initialized = 0;
+
+    l_success("Patches cleanup complete");
+}
+
+// ===== DEBUG FUNCTIONS =====
+
+void debug_print_patch_status(void) {
+    l_info("=== Patch Status ===");
+    l_info("  Initialized: %s", fluffy_state.initialized ? "Yes" : "No");
+    l_info("  Monetization Disabled: %s", fluffy_state.monetization_disabled ? "Yes" : "No");
+    l_info("  Unlimited Currency: %s", fluffy_state.unlimited_currency ? "Yes" : "No");
+    l_info("  Debug Mode: %s", fluffy_state.debug_mode ? "Yes" : "No");
+    l_info("  Memory Tracking: %s", fluffy_state.memory_tracking ? "Yes" : "No");
+
+    // Print memory stats if tracking is enabled
+    if (fluffy_state.memory_tracking) {
+        print_memory_stats();
+    }
+}
+
+// Memory tracking macros for convenience
+#define MALLOC(size) malloc_tracked(size, __func__, __LINE__)
+#define FREE(ptr) free_tracked(ptr, __func__, __LINE__)
+#define REALLOC(ptr, size) realloc_tracked(ptr, size, __func__, __LINE__)
+#define CALLOC(num, size) calloc_tracked(num, size, __func__, __LINE__)

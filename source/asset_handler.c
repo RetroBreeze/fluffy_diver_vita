@@ -62,6 +62,7 @@ static int load_png_file(const char *path, void **data, size_t *size);
 static int load_dat_file(const char *path, void **data, size_t *size);
 static void *get_cached_asset(const char *filename);
 static void cache_asset(const char *filename, void *data, size_t size, int format);
+static void preload_critical_assets(void); // MOVED TO FORWARD DECLARATION
 
 // Initialize asset system
 int init_asset_system(void) {
