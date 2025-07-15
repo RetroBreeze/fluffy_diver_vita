@@ -1,75 +1,55 @@
-cmake_minimum_required(VERSION 3.14)
+cmake_minimum_required(VERSION 3.19)
 
-if (NOT DEFINED ENV{VITASDK} AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
-  message(FATAL_ERROR "Please define VITASDK env var to point to your SDK path or set CMAKE_TOOLCHAIN_FILE.")
-endif ()
+if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+    if(DEFINED ENV{VITASDK})
+        set(CMAKE_TOOLCHAIN_FILE "$ENV{VITASDK}/share/vita.toolchain.cmake" CACHE PATH "toolchain file")
+    else()
+        message(FATAL_ERROR "Please define VITASDK to point to your SDK path!")
+    endif()
+endif()
 
-set(CMAKE_TOOLCHAIN_FILE "$ENV{VITASDK}/share/vita.toolchain.cmake" CACHE PATH "Toolchain file")
-
-project(so_loader C CXX)
-
+project(FluffyDiver)
 include("${VITASDK}/share/vita.cmake" REQUIRED)
 
-# Vita application configuration
-set(VITA_APP_NAME "so-loader")
-set(VITA_TITLEID "SOLOADER0")
-set(VITA_VPKNAME "so_loader")
-set(VITA_VERSION "01.00")
-set(VITA_MKSFOEX_FLAGS "-d ATTRIBUTE2=12")
+set(VITA_APP_NAME "Fluffy Diver")
+set(VITA_TITLEID  "FLUF00001")
+set(VITA_VERSION  "01.00")
+set(VITA_MKSFOEX_FLAGS "-d ATTRIBUTE2=12")  # Extended memory mode for larger games
 
-# Optional: used for "send" and "dump" targets
-set(PSVITAIP "192.168.0.198" CACHE STRING "PSVita IP (for FTP access)")
-set(PARSECOREPATH "$ENV{PARSECOREPATH}" CACHE STRING "vita-parse-core main.py")
+# Game-specific configuration
+set(SO_PATH "ux0:data/fluffydiver/libFluffyDiver.so")
+set(DATA_PATH "ux0:data/fluffydiver")
+set(ASSETS_PATH "ux0:data/fluffydiver/assets")
 
-# Game-specific definitions
-set(DATA_PATH "ux0:data/gamename/" CACHE STRING "Path to data (with trailing /)")
-set(SO_PATH "${DATA_PATH}main.so" CACHE STRING "Path to .so")
-add_definitions(-DDATA_PATH="${DATA_PATH}" -DSO_PATH="${SO_PATH}")
-
-option(USE_SCELIBC_IO "Use SceLibcBridge for IO and some other std functions" ON)
-if (USE_SCELIBC_IO)
-  add_definitions(-DUSE_SCELIBC_IO)
-endif()
-
-set(SHADER_FORMAT "GLSL" CACHE STRING "Preferred shader format (one of 'GLSL', 'CG', 'GXP')")
-if (${SHADER_FORMAT} STREQUAL "GLSL")
-  add_definitions(-DUSE_GLSL_SHADERS)
-elseif (${SHADER_FORMAT} STREQUAL "CG")
-  add_definitions(-DUSE_CG_SHADERS)
-elseif (${SHADER_FORMAT} STREQUAL "GXP")
-  add_definitions(-DUSE_GXP_SHADERS)
-else()
-  message(FATAL_ERROR "SHADER_FORMAT option can only be one of: 'GLSL', 'CG', 'GXP'")
-endif()
-
-set(valid_dump_formats GLSL CG)
-option(DUMP_COMPILED_SHADERS "When using GLSL or CG shader format, cache compiled shaders on disk" ON)
-if (DUMP_COMPILED_SHADERS)
-  if (SHADER_FORMAT IN_LIST valid_dump_formats)
-    add_definitions(-DDUMP_COMPILED_SHADERS)
-  else()
-    message(WARNING "DUMP_COMPILED_SHADERS has no effect for the chosen shader format ${SHADER_FORMAT}")
-  endif()
-endif()
-
-# Unique debug definition for loader's logging to not interfere with anything
-if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-  add_definitions(-DDEBUG_SOLOADER)
-  # Uncomment this for verbose FalsoJNI logging:
-  #add_definitions(-DFALSOJNI_DEBUGLEVEL=0)
-endif()
-
-# makes sincos, sincosf, etc. visible
+# Compiler flags optimized for game performance
 add_definitions(-D_GNU_SOURCE -D__POSIX_VISIBLE=999999)
+add_definitions(-DSO_PATH=\"${SO_PATH}\")
+add_definitions(-DDATA_PATH=\"${DATA_PATH}\")
+add_definitions(-DASSETS_PATH=\"${ASSETS_PATH}\")
 
+# Fluffy Diver specific defines
+add_definitions(-DGAME_TITLE_ID=\"${VITA_TITLEID}\")
+add_definitions(-DGAME_NAME=\"${VITA_APP_NAME}\")
+add_definitions(-DLOAD_ADDRESS=0x98000000)
+
+# Performance and compatibility flags
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -O3 -g -ffast-math -mfloat-abi=softfp -Wno-deprecated")
 set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS} -std=gnu++20 -Wno-write-strings -Wno-psabi")
 
+# Memory management wrappers for stability
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,--wrap,malloc,--wrap,free,--wrap,calloc,--wrap,realloc")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,--wrap,memcpy,--wrap,memmove,--wrap,memset")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,--wrap,memchr,--wrap,memcmp,--wrap,strlen,--wrap,strcpy")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,--wrap,strncpy,--wrap,strcat,--wrap,strncat,--wrap,strcmp")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,--wrap,strncmp,--wrap,strchr,--wrap,strrchr,--wrap,strstr")
+
+# Source files for Fluffy Diver port
 add_executable(${CMAKE_PROJECT_NAME}
                source/main.c
                source/dynlib.c
                source/java.c
                source/patch.c
+               source/fluffydiver_jni.c
                source/reimpl/bits/_ctype.c
                source/reimpl/egl.c
                source/reimpl/errno.c
@@ -86,6 +66,7 @@ add_executable(${CMAKE_PROJECT_NAME}
                source/utils/logger.c
                source/utils/settings.c
                source/utils/utils.c
+               source/asset_handler.c
                lib/falso_jni/FalsoJNI.c
                lib/falso_jni/FalsoJNI_ImplBridge.c
                lib/falso_jni/FalsoJNI_Logger.c
@@ -93,31 +74,48 @@ add_executable(${CMAKE_PROJECT_NAME}
                lib/fios/fios.c
                lib/so_util/so_util.c)
 
+# Build libc bridge
 add_subdirectory(lib/libc_bridge)
 add_dependencies(${CMAKE_PROJECT_NAME} SceLibcBridge)
 
+# Include directories
 target_include_directories(${CMAKE_PROJECT_NAME} SYSTEM
                            PUBLIC ${CMAKE_SOURCE_DIR}/lib
-                           )
+                           PUBLIC ${CMAKE_SOURCE_DIR}/source)
 
 target_include_directories(${CMAKE_PROJECT_NAME}
                            PUBLIC ${CMAKE_SOURCE_DIR}/source
-                           )
+                           PUBLIC ${CMAKE_SOURCE_DIR}/include)
 
+# Link libraries required for Fluffy Diver
 target_link_libraries(${CMAKE_PROJECT_NAME}
+                      # Essential libraries
                       -Wl,--whole-archive pthread -Wl,--no-whole-archive
                       stdc++
+
+                      # Graphics libraries
                       vitaGL
                       vitashark
                       SceShaccCgExt
-                      taihen_stub
                       SceShaccCg_stub
+
+                      # Audio libraries
+                      openal
+                      vorbisfile
+                      vorbis
+                      ogg
+
+                      # System libraries
+                      mathneon
                       z
                       m
-                      ScePgf_stub
-                      mathneon
+
+                      # Vita-specific libraries
+                      taihen_stub
                       kubridge_stub
                       ${CMAKE_BINARY_DIR}/lib/libc_bridge/stubs/libSceLibcBridge_stub.a
+
+                      # Vita system stubs
                       SceHid_stub
                       SceTouch_stub
                       SceMotion_stub
@@ -134,41 +132,22 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
                       ScePower_stub
                       SceTouch_stub
                       SceVshBridge_stub
-                      )
+                      ScePgf_stub
+                      SceKernelModulemgr_stub
+                      SceIofilemgr_stub
+                      SceNet_stub
+                      SceNetCtl_stub
+                      SceHttp_stub
+                      SceSsl_stub)
 
+# Create self and VPK
 vita_create_self(eboot.bin ${CMAKE_PROJECT_NAME} UNSAFE NOASLR)
-vita_create_vpk(${VITA_VPKNAME}.vpk ${VITA_TITLEID} eboot.bin
+vita_create_vpk(${CMAKE_PROJECT_NAME}.vpk ${VITA_TITLEID} eboot.bin
                 VERSION ${VITA_VERSION}
                 NAME ${VITA_APP_NAME}
                 FILE ${CMAKE_SOURCE_DIR}/extras/cpuinfo cpuinfo
-                ${CMAKE_SOURCE_DIR}/extras/meminfo meminfo
-                ${CMAKE_SOURCE_DIR}/extras/livearea/icon0.png sce_sys/icon0.png
-                ${CMAKE_SOURCE_DIR}/extras/livearea/pic0.png sce_sys/pic0.png
-                ${CMAKE_SOURCE_DIR}/extras/livearea/startup.png sce_sys/livearea/contents/startup.png
-                ${CMAKE_SOURCE_DIR}/extras/livearea/bg0.png sce_sys/livearea/contents/bg0.png
-                ${CMAKE_SOURCE_DIR}/extras/livearea/template.xml sce_sys/livearea/contents/template.xml
-                )
-
-add_custom_target(send
-                  COMMAND echo destroy | nc ${PSVITAIP} 1338
-                  COMMAND echo destroy | nc ${PSVITAIP} 1338
-                  COMMAND curl -T eboot.bin ftp://${PSVITAIP}:1337/ux0:/app/${VITA_TITLEID}/
-                  COMMAND echo launch ${VITA_TITLEID} | nc ${PSVITAIP} 1338
-                  DEPENDS ${VITA_VPKNAME}.vpk-vpk
-                  )
-
-add_custom_target(send_kvdb
-                  COMMAND echo destroy | nc ${PSVITAIP} 1338
-                  COMMAND curl -T eboot.bin ftp://${PSVITAIP}:1337/ux0:/app/${VITA_TITLEID}/
-                  COMMAND echo launch ux0:/app/${VITA_TITLEID}/eboot.bin | nc ${PSVITAIP} 1338
-                  DEPENDS ${VITA_VPKNAME}.vpk-vpk
-                  )
-
-add_custom_target(dump
-                  COMMAND ${CMAKE_SOURCE_DIR}/extras/scripts/get_dump.sh ${PSVITAIP}
-                  COMMAND python3 ${PARSECOREPATH} coredump ${CMAKE_PROJECT_NAME}
-                  )
-
-add_custom_target(reboot
-                  COMMAND echo reboot | nc ${PSVITAIP} 1338
-                  )
+                ${CMAKE_SOURCE_DIR}/extras/gamecontrollerdb.txt gamecontrollerdb.txt
+                FILE ${CMAKE_SOURCE_DIR}/livearea/contents/bg.png sce_sys/livearea/contents/bg.png
+                ${CMAKE_SOURCE_DIR}/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
+                ${CMAKE_SOURCE_DIR}/livearea/contents/icon0.png sce_sys/icon0.png
+                ${CMAKE_SOURCE_DIR}/livearea/contents/template.xml sce_sys/livearea/contents/template.xml)
